@@ -56,14 +56,25 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
         switch type {
         case "syncSnapshot":
-            guard let payload = message["payload"] else {
+            guard let payload = message["payload"] as? [String: Any] else {
                 return ["ok": false, "reason": "missing-payload"]
             }
 
+            guard payload["capturedAt"] as? String != nil,
+                  payload["tabs"] as? [[String: Any]] != nil,
+                  payload["bookmarks"] as? [[String: Any]] != nil else {
+                return ["ok": false, "reason": "invalid-payload-shape"]
+            }
+
             do {
-                let data = try JSONSerialization.data(withJSONObject: payload)
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
                 UserDefaults.standard.set(data, forKey: snapshotStorageKey)
-                return ["ok": true, "stored": true]
+                return [
+                    "ok": true,
+                    "stored": true,
+                    "tabCount": (payload["tabs"] as? [[String: Any]])?.count ?? 0,
+                    "bookmarkCount": (payload["bookmarks"] as? [[String: Any]])?.count ?? 0
+                ]
             } catch {
                 logger.error("Could not serialize snapshot payload: \(error.localizedDescription, privacy: .public)")
                 return ["ok": false, "reason": "serialization-failed"]

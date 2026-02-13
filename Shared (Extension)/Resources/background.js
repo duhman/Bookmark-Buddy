@@ -1,17 +1,24 @@
 const NATIVE_APP_IDENTIFIER = "marten.Bookmark-Buddy";
+const LAST_SYNC_KEY = "lastSnapshot";
+const SYNC_DEBOUNCE_MS = 1200;
+
+let pendingSyncTimer;
+let syncInFlight = false;
+
+function normalizeTab(tab) {
+    return {
+        id: tab.id,
+        title: tab.title ?? "Untitled",
+        url: tab.url,
+        active: Boolean(tab.active),
+        pinned: Boolean(tab.pinned),
+        windowId: tab.windowId
+    };
+}
 
 async function getOpenTabsSnapshot() {
     const tabs = await browser.tabs.query({});
-    return tabs
-        .filter((tab) => tab.url)
-        .map((tab) => ({
-            id: tab.id,
-            title: tab.title ?? "Untitled",
-            url: tab.url,
-            active: Boolean(tab.active),
-            pinned: Boolean(tab.pinned),
-            windowId: tab.windowId
-        }));
+    return tabs.filter((tab) => tab.url).map(normalizeTab);
 }
 
 async function getBookmarkSnapshot() {
@@ -26,6 +33,7 @@ async function getBookmarkSnapshot() {
         for (const node of nodes) {
             const label = node.title || "Root";
             const path = parentPath ? `${parentPath}/${label}` : label;
+
             if (node.url) {
                 flattened.push({
                     id: node.id,
@@ -45,47 +53,93 @@ async function getBookmarkSnapshot() {
     return flattened;
 }
 
-async function synchronizeSnapshot() {
-    const [tabs, bookmarks] = await Promise.all([
-        getOpenTabsSnapshot(),
-        getBookmarkSnapshot()
-    ]);
-
-    const snapshot = {
-        capturedAt: new Date().toISOString(),
-        tabs,
-        bookmarks,
-        device: "iPhone 13 Pro+",
-        minimumiOS: "26.0"
-    };
-
-    await browser.storage.local.set({ lastSnapshot: snapshot });
-
-    let nativeResult = { ok: false, reason: "native-messaging-unavailable" };
+async function sendSnapshotToNativeHost(snapshot) {
     try {
-        nativeResult = await browser.runtime.sendNativeMessage(NATIVE_APP_IDENTIFIER, {
+        return await browser.runtime.sendNativeMessage(NATIVE_APP_IDENTIFIER, {
             type: "syncSnapshot",
             payload: snapshot
         });
     } catch (error) {
-        nativeResult = { ok: false, reason: String(error) };
+        return { ok: false, reason: String(error) };
+    }
+}
+
+async function synchronizeSnapshot(reason = "manual") {
+    if (syncInFlight) {
+        return { ok: false, reason: "sync-already-running" };
     }
 
-    return {
-        ok: true,
-        snapshot,
-        nativeResult
-    };
+    syncInFlight = true;
+
+    try {
+        const [tabs, bookmarks] = await Promise.all([
+            getOpenTabsSnapshot(),
+            getBookmarkSnapshot()
+        ]);
+
+        const snapshot = {
+            capturedAt: new Date().toISOString(),
+            reason,
+            tabs,
+            bookmarks,
+            device: "iPhone 13 Pro",
+            minimumiOS: "26.0"
+        };
+
+        const nativeResult = await sendSnapshotToNativeHost(snapshot);
+
+        await browser.storage.local.set({
+            [LAST_SYNC_KEY]: {
+                ...snapshot,
+                nativeResult
+            }
+        });
+
+        return {
+            ok: true,
+            snapshot,
+            nativeResult
+        };
+    } finally {
+        syncInFlight = false;
+    }
+}
+
+function queueBackgroundSync(reason) {
+    clearTimeout(pendingSyncTimer);
+    pendingSyncTimer = setTimeout(() => {
+        synchronizeSnapshot(reason);
+    }, SYNC_DEBOUNCE_MS);
+}
+
+function registerAutoSyncListeners() {
+    browser.tabs.onCreated.addListener(() => queueBackgroundSync("tab-created"));
+    browser.tabs.onUpdated.addListener(() => queueBackgroundSync("tab-updated"));
+    browser.tabs.onRemoved.addListener(() => queueBackgroundSync("tab-removed"));
+
+    if (browser.bookmarks?.onCreated) {
+        browser.bookmarks.onCreated.addListener(() => queueBackgroundSync("bookmark-created"));
+        browser.bookmarks.onChanged.addListener(() => queueBackgroundSync("bookmark-changed"));
+        browser.bookmarks.onMoved.addListener(() => queueBackgroundSync("bookmark-moved"));
+        browser.bookmarks.onRemoved.addListener(() => queueBackgroundSync("bookmark-removed"));
+        browser.bookmarks.onImportEnded?.addListener(() => queueBackgroundSync("bookmark-import"));
+    }
+
+    browser.runtime.onStartup.addListener(() => queueBackgroundSync("extension-startup"));
+    browser.runtime.onInstalled.addListener(() => queueBackgroundSync("extension-installed"));
 }
 
 browser.runtime.onMessage.addListener((request) => {
     if (request?.type === "sync-now") {
-        return synchronizeSnapshot();
+        return synchronizeSnapshot("manual");
     }
 
     if (request?.type === "get-last-snapshot") {
-        return browser.storage.local.get("lastSnapshot");
+        return browser.storage.local.get(LAST_SYNC_KEY);
     }
 
     return Promise.resolve({ ok: false, reason: "unsupported-message" });
 });
+
+registerAutoSyncListeners();
+queueBackgroundSync("background-initialized");

@@ -9,10 +9,31 @@ function renderSummary(result) {
     const { snapshot, nativeResult } = result;
     return [
         `Synced at: ${snapshot.capturedAt}`,
+        `Reason: ${snapshot.reason}`,
         `Open tabs: ${snapshot.tabs.length}`,
         `Bookmarks: ${snapshot.bookmarks.length}`,
         `Native storage: ${nativeResult?.ok ? "updated" : `unavailable (${nativeResult?.reason ?? "unknown"})`}`
     ].join("\n");
+}
+
+async function showLastSnapshot() {
+    try {
+        const data = await browser.runtime.sendMessage({ type: "get-last-snapshot" });
+        const snapshot = data?.lastSnapshot;
+
+        if (!snapshot) {
+            status.textContent = "No sync yet. Tap 'Sync now'.";
+            return;
+        }
+
+        status.textContent = renderSummary({
+            ok: true,
+            snapshot,
+            nativeResult: snapshot.nativeResult
+        });
+    } catch (error) {
+        status.textContent = `Could not read last sync: ${String(error)}`;
+    }
 }
 
 async function syncNow() {
@@ -30,3 +51,4 @@ async function syncNow() {
 }
 
 syncButton.addEventListener("click", syncNow);
+showLastSnapshot();
