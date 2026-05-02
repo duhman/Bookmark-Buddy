@@ -4,6 +4,7 @@ const SYNC_DEBOUNCE_MS = 1200;
 
 let pendingSyncTimer;
 let syncInFlight = false;
+let lastSnapshotSignature;
 
 function normalizeTab(tab) {
     return {
@@ -53,6 +54,22 @@ async function getBookmarkSnapshot() {
     return flattened;
 }
 
+function buildSnapshotSignature(tabs, bookmarks) {
+    return JSON.stringify({
+        tabs: tabs.map((tab) => [tab.url, tab.title, tab.pinned]),
+        bookmarks: bookmarks.map((bookmark) => [bookmark.url, bookmark.title, bookmark.path])
+    });
+}
+
+async function getDeviceDescriptor() {
+    try {
+        const info = await browser.runtime.getPlatformInfo();
+        return `${info.os}-${info.arch}`;
+    } catch {
+        return "unknown-platform";
+    }
+}
+
 async function sendSnapshotToNativeHost(snapshot) {
     try {
         return await browser.runtime.sendNativeMessage(NATIVE_APP_IDENTIFIER, {
@@ -72,21 +89,31 @@ async function synchronizeSnapshot(reason = "manual") {
     syncInFlight = true;
 
     try {
-        const [tabs, bookmarks] = await Promise.all([
+        const [tabs, bookmarks, device] = await Promise.all([
             getOpenTabsSnapshot(),
-            getBookmarkSnapshot()
+            getBookmarkSnapshot(),
+            getDeviceDescriptor()
         ]);
+
+        const signature = buildSnapshotSignature(tabs, bookmarks);
+        const isUnchanged = signature === lastSnapshotSignature;
 
         const snapshot = {
             capturedAt: new Date().toISOString(),
             reason,
             tabs,
             bookmarks,
-            device: "iPhone 13 Pro",
-            minimumiOS: "26.0"
+            device,
+            changed: !isUnchanged
         };
 
-        const nativeResult = await sendSnapshotToNativeHost(snapshot);
+        let nativeResult = { ok: true, skipped: true, reason: "snapshot-unchanged" };
+        if (!isUnchanged || reason === "manual") {
+            nativeResult = await sendSnapshotToNativeHost(snapshot);
+            if (nativeResult?.ok) {
+                lastSnapshotSignature = signature;
+            }
+        }
 
         await browser.storage.local.set({
             [LAST_SYNC_KEY]: {
@@ -114,7 +141,11 @@ function queueBackgroundSync(reason) {
 
 function registerAutoSyncListeners() {
     browser.tabs.onCreated.addListener(() => queueBackgroundSync("tab-created"));
-    browser.tabs.onUpdated.addListener(() => queueBackgroundSync("tab-updated"));
+    browser.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+        if (changeInfo.url || changeInfo.title || typeof changeInfo.pinned === "boolean") {
+            queueBackgroundSync("tab-updated");
+        }
+    });
     browser.tabs.onRemoved.addListener(() => queueBackgroundSync("tab-removed"));
 
     if (browser.bookmarks?.onCreated) {

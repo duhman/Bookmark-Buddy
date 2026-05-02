@@ -12,7 +12,8 @@ function renderSummary(result) {
         `Reason: ${snapshot.reason}`,
         `Open tabs: ${snapshot.tabs.length}`,
         `Bookmarks: ${snapshot.bookmarks.length}`,
-        `Native storage: ${nativeResult?.ok ? "updated" : `unavailable (${nativeResult?.reason ?? "unknown"})`}`
+        `Changes detected: ${snapshot.changed ? "yes" : "no"}`,
+        `Native storage: ${nativeResult?.skipped ? "skipped (unchanged)" : nativeResult?.ok ? "updated" : `unavailable (${nativeResult?.reason ?? "unknown"})`}`
     ].join("\n");
 }
 
